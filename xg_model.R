@@ -79,14 +79,19 @@ run_advanced_tests <- function(data) {
   data <- standardize_xg_features(data)
   data$side_group <- ifelse(data$sideOfAttack %in% c("LEFT", "RIGHT"), "SIDE", as.character(data$sideOfAttack))
   tests <- list()
+  clean_for_test <- function(dataset, column) {
+    dataset[!is.na(dataset[[column]]) & dataset[[column]] != "" & dataset[[column]] != "N/A" & !is.na(dataset$goal), , drop = FALSE]
+  }
   safe_aov <- function(formula, dataset) try(summary(stats::aov(formula, data = dataset)), silent = TRUE)
   safe_t <- function(formula, dataset) try(stats::t.test(formula, data = dataset), silent = TRUE)
-  tests$assist_goal_anova <- safe_aov(goal ~ typeOfAssist, data)
-  tests$side_middle_goal_anova <- safe_aov(goal ~ side_group, data)
-  tests$left_right_middle_goal_anova <- safe_aov(goal ~ sideOfAttack, data)
-  tests$attack_type_goal_anova <- safe_aov(goal ~ typeOfAttack, data[data$typeOfAttack != "PENALTY", ])
-  tests$shot_type_goal_anova <- safe_aov(goal ~ shotType, data)
-  foot_data <- data[!is.na(data$domVSnondom) & data$domVSnondom %in% c("DOM", "NONDOM"), ]
+  tests$assist_goal_anova <- safe_aov(goal ~ typeOfAssist, clean_for_test(data, "typeOfAssist"))
+  tests$side_middle_goal_anova <- safe_aov(goal ~ side_group, clean_for_test(data, "side_group"))
+  tests$left_right_middle_goal_anova <- safe_aov(goal ~ sideOfAttack, clean_for_test(data, "sideOfAttack"))
+  attack_data <- clean_for_test(data, "typeOfAttack")
+  tests$attack_type_goal_anova <- safe_aov(goal ~ typeOfAttack, attack_data[attack_data$typeOfAttack != "PENALTY", ])
+  tests$shot_type_goal_anova <- safe_aov(goal ~ shotType, clean_for_test(data, "shotType"))
+  foot_data <- clean_for_test(data, "domVSnondom")
+  foot_data <- foot_data[foot_data$domVSnondom %in% c("DOM", "NONDOM"), ]
   tests$dominant_foot_t_test <- safe_t(goal ~ domVSnondom, foot_data)
   tests
 }
