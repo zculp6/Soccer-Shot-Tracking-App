@@ -56,6 +56,25 @@ predict_xg <- function(data, model_path = "xg_model.rds", fallback = NULL) {
   pmax(0.01, pmin(0.99, heuristic))
 }
 
+predict_psxg <- function(data, fallback = NULL) {
+  net_x <- suppressWarnings(as.numeric(data$net_x))
+  net_y <- suppressWarnings(as.numeric(data$net_y))
+  result <- as.character(data$Result)
+  goal_width <- get0("GOAL_WIDTH", ifnotfound = 24)
+  goal_height <- get0("GOAL_HEIGHT", ifnotfound = 8)
+  in_frame <- !is.na(net_x) & !is.na(net_y) &
+    net_x >= -goal_width / 2 & net_x <= goal_width / 2 &
+    net_y >= 0 & net_y <= goal_height
+  center_distance <- sqrt((net_x / (goal_width / 2))^2 + ((net_y - goal_height / 2) / (goal_height / 2))^2)
+  psxg <- stats::plogis(1.6 - 1.4 * center_distance)
+  psxg <- ifelse(in_frame, psxg, 0.01)
+  psxg <- ifelse(result == "GOAL" & is.na(net_x), 0.75, psxg)
+  psxg <- ifelse(result == "SAVED" & is.na(net_x), 0.25, psxg)
+  psxg <- ifelse(result %in% c("MISSED", "BLOCKED") & is.na(net_x), 0.01, psxg)
+  if (!is.null(fallback)) psxg <- ifelse(is.na(psxg), fallback, psxg)
+  pmax(0.01, pmin(0.99, psxg))
+}
+
 run_advanced_tests <- function(data) {
   data <- standardize_xg_features(data)
   data$side_group <- ifelse(data$sideOfAttack %in% c("LEFT", "RIGHT"), "SIDE", as.character(data$sideOfAttack))
@@ -66,6 +85,7 @@ run_advanced_tests <- function(data) {
   tests$side_middle_goal_anova <- safe_aov(goal ~ side_group, data)
   tests$left_right_middle_goal_anova <- safe_aov(goal ~ sideOfAttack, data)
   tests$attack_type_goal_anova <- safe_aov(goal ~ typeOfAttack, data[data$typeOfAttack != "PENALTY", ])
+  tests$shot_type_goal_anova <- safe_aov(goal ~ shotType, data)
   foot_data <- data[!is.na(data$domVSnondom) & data$domVSnondom %in% c("DOM", "NONDOM"), ]
   tests$dominant_foot_t_test <- safe_t(goal ~ domVSnondom, foot_data)
   tests
