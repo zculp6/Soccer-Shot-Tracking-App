@@ -7,7 +7,7 @@ standardize_xg_features <- function(data) {
   data$X <- suppressWarnings(as.numeric(data$X))
   data$Y <- suppressWarnings(as.numeric(data$Y))
   goal_x <- ifelse(is.na(data$X) | data$X <= 60, 0, 120)
-  goal_y <- 40
+  goal_y <- 37.5
   dx <- abs(data$X - goal_x)
   dy <- abs(data$Y - goal_y)
   data$distance_to_goal <- sqrt(dx^2 + dy^2)
