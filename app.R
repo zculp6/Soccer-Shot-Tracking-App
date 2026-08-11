@@ -2,8 +2,8 @@
 # Run with: shiny::runApp()
 
 required_packages <- c(
-  "shiny", "bslib", "dplyr", "ggplot2", "readr", "readxl", "DT", "tidyverse", 
-  "digest", "scales", "tibble", "magick", "DBI", "RPostgres", "bcrypt", "jsonlite"
+  "shiny", "bslib", "dplyr", "ggplot2", "readr", "readxl", "DT",
+  "tidyr", "digest", "scales", "tibble", "DBI", "jsonlite"
 )
 missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
 if (length(missing_packages) > 0) {
@@ -17,12 +17,23 @@ library(ggplot2)
 library(readr)
 library(readxl)
 library(DT)
-library(tidyverse)
+library(tidyr)
+library(tibble)
 library(DBI)
 
 source("xg_model.R")
 
+require_optional_package <- function(package, feature) {
+  if (!requireNamespace(package, quietly = TRUE)) {
+    stop(feature, " requires the ", package, " package. Add it to the deployment dependencies.", call. = FALSE)
+  }
+}
+
 get_db_connection <- function() {
+  require_optional_package("RPostgres", "Database access")
+  if (Sys.getenv("NEON_DB") == "" || Sys.getenv("NEON_USER") == "") {
+    stop("Database access requires NEON_DB, NEON_USER, and NEON_PASS environment variables.", call. = FALSE)
+  }
   host_env <- Sys.getenv("NEON_HOST")
   if (host_env == "") host_env <- "localhost"
   dbConnect(
@@ -982,6 +993,7 @@ server <- function(input, output, session) {
     login_email <- trimws(input$coach_email)
     
     if (input$auth_mode == "Sign Up") {
+      require_optional_package("bcrypt", "Coach sign up")
       hashed_pw <- bcrypt::hashpw(input$coach_password)
       new_team_code <- generate_unique_team_code("New Team")
       
@@ -1016,22 +1028,25 @@ server <- function(input, output, session) {
       
       if (nrow(user_record) == 0) {
         showNotification("Email not found. Please sign up or use a different email.", type = "error")
-      } else if (nrow(user_record) == 1 && bcrypt::checkpw(input$coach_password, user_record$password_hash)) {
-        pr <- list(
-          email = user_record$email,
-          team_name = user_record$team_name,
-          level = user_record$team_level,
-          team_code = user_record$team_code,
-          role = "Coach",
-          show_player_data = as.logical(user_record$show_player_data),
-          signed_in = TRUE
-        )
-        profile(pr)
-        set_shots(load_user_data(user_record$email))
-        showNotification("Signed in successfully.", type = "message")
-        nav_select("main_nav", "user_info_tab")
       } else {
-        showNotification("Invalid password.", type = "error")
+        require_optional_package("bcrypt", "Coach sign in")
+        if (nrow(user_record) == 1 && bcrypt::checkpw(input$coach_password, user_record$password_hash)) {
+          pr <- list(
+            email = user_record$email,
+            team_name = user_record$team_name,
+            level = user_record$team_level,
+            team_code = user_record$team_code,
+            role = "Coach",
+            show_player_data = as.logical(user_record$show_player_data),
+            signed_in = TRUE
+          )
+          profile(pr)
+          set_shots(load_user_data(user_record$email))
+          showNotification("Signed in successfully.", type = "message")
+          nav_select("main_nav", "user_info_tab")
+        } else {
+          showNotification("Invalid password.", type = "error")
+        }
       }
     }
     
