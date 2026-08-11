@@ -547,9 +547,8 @@ net_plot <- function(data = NULL, point = NULL) {
     {if (!is.null(data) && nrow(data) > 1) stat_density_2d(data = data, aes(net_x, net_y, fill = after_stat(level)), geom = "polygon", alpha = .45) else NULL} +
     # Render non-goals as white dots
     {if (!is.null(data) && nrow(data) > 0) geom_point(data = filter(data, Result != "GOAL" & (is.na(goals.x) | goals.x != 1)), aes(net_x, net_y), colour = "white", alpha = .75, size = 2) else NULL} +
-    # Render goals as green stars (shape = 8)
-    {if (!is.null(data) && nrow(data) > 0) geom_point(data = filter(data, Result == "GOAL" | goals.x == 1), aes(net_x, net_y), colour = "#32CD32", shape = 8, size = 4, stroke = 1.2) else NULL} +
-    {if (!is.null(data) && nrow(data) > 0) geom_point(data = data, aes(net_x, net_y), colour = "white", alpha = .75, size = 2) else NULL} +
+    # Render goals as yellow stars (shape = 8)
+    {if (!is.null(data) && nrow(data) > 0) geom_point(data = filter(data, Result == "GOAL" | goals.x == 1), aes(net_x, net_y), colour = "#FFD700", shape = 8, size = 8, stroke = 1.6) else NULL} +
     {if (!is.null(point) && !is.null(point$x) && !is.null(point$y) && !is.na(point$x) && !is.na(point$y)) {
       list(
         annotate("point", x = point$x, y = point$y, shape = 21, size = 7, fill = "white", colour = "black", stroke = 1.4),
@@ -638,6 +637,31 @@ ui <- page_navbar(
         transform: translate(-50%, -50%) !important;
         z-index: 9999;
       }
+      .dataTables_wrapper {
+        width: 100%;
+        overflow-x: auto;
+      }
+      .dataTables_wrapper .dataTables_scroll,
+      .dataTables_wrapper .dataTables_scrollBody {
+        border-bottom: 0 !important;
+      }
+      table.dataTable.no-footer {
+        border-bottom: 0 !important;
+      }
+      @media (max-width: 768px) {
+        .bslib-sidebar-layout {
+          --_sidebar-width: min(100%, 22rem);
+        }
+        .dataTables_wrapper .dataTables_paginate {
+          float: none;
+          text-align: center;
+          margin-top: 0.5rem;
+        }
+        .dataTables_wrapper .dataTables_info {
+          float: none;
+          text-align: center;
+        }
+      }
     "))
   ),
   theme = bs_theme(bootswatch = "flatly"),
@@ -713,7 +737,7 @@ ui <- page_navbar(
                                sidebar = sidebar(selectInput("single_game", "Individual game shot chart", choices = NULL), title = "Game", open = TRUE), 
                                p(strong("Note: Click a point on the shot chart below to see shot details.")), 
                                plotOutput("shot_chart", click = "shot_chart_click", width = "100%", height = "60vh"), 
-                               plotOutput("clicked_net", width = "100%", height = "35vh"), 
+                               uiOutput("clicked_net_ui"), 
                                DTOutput("clicked_shot"), 
                                plotOutput("xg_timeline", width = "100%", height = "45vh")
                              )
@@ -1479,9 +1503,10 @@ server <- function(input, output, session) {
   })
   
   penalty_data <- reactive({
+    team_filter <- input$penalty_team_filter %||% team_display_name()
     advanced_data() %>% 
       filter(typeOfAttack == "PENALTY") %>%
-      filter(if (input$penalty_team_filter == "Opponent") Team == "OPPONENT" else Team == "TEAM")
+      filter(if (identical(team_filter, "Opponent")) Team == "OPPONENT" else Team == "TEAM")
   })
   
   output$penalty_goal_rates <- renderDT({
@@ -1541,18 +1566,39 @@ server <- function(input, output, session) {
     data <- selected_game(); paste0("TEAM ", sum(data$goals.x[data$Team == "TEAM"], na.rm = TRUE), " - ", sum(data$goals.x[data$Team == "OPPONENT"], na.rm = TRUE), " OPPONENT")
   })
   
-  output$shot_chart <- renderPlot(soccer_pitch(selected_game() %>% mutate(row_id = row_number()), aes(X, Y, colour = Result, size = goals.y)) + geom_point(alpha = .85) + annotate("label", x = FIELD_LENGTH / 2, y = FIELD_WIDTH - 4, label = scoreline_text(), size = 6, fill = "white") + labs(colour = "Result", size = "xG"))
+  output$shot_chart <- renderPlot({
+    chart_data <- selected_game() %>% mutate(row_id = row_number())
+    soccer_pitch(chart_data, aes(X, Y)) +
+      geom_point(aes(colour = Result, size = goals.y), alpha = .85) +
+      geom_point(
+        data = chart_data %>% filter(Result == "GOAL", !is.na(net_x), !is.na(net_y)),
+        aes(X, Y),
+        colour = "#FFD700", shape = 8, size = 8, stroke = 1.6, show.legend = FALSE
+      ) +
+      scale_colour_manual(values = c(GOAL = "#FFD700", SAVED = "#2C7FB8", MISSED = "#666666", BLOCKED = "#D95F0E"), drop = FALSE) +
+      scale_size_continuous(range = c(4, 12)) +
+      annotate("label", x = FIELD_LENGTH / 2, y = FIELD_WIDTH - 4, label = scoreline_text(), size = 6, fill = "white") +
+      labs(colour = "Result", size = "xG")
+  })
   
   clicked_shot_data <- reactive({
     p <- input$shot_chart_click; data <- selected_game() %>% mutate(row_id = row_number()); if (is.null(p) || nrow(data) == 0) return(data[0, ])
     data[which.min((data$X - p$x)^2 + (data$Y - p$y)^2), , drop = FALSE]
   })
   
-  output$clicked_net <- renderPlot({ d <- clicked_shot_data(); net_plot(point = if (nrow(d) == 1 && !is.na(d$net_x[1]) && !is.na(d$net_y[1])) list(x = d$net_x[1], y = d$net_y[1]) else NULL) })
+  output$clicked_net_ui <- renderUI({
+    data <- selected_game()
+    if (all(is.na(data$net_x)) && all(is.na(data$net_y))) return(NULL)
+    plotOutput("clicked_net", width = "100%", height = "35vh")
+  })
+  output$clicked_net <- renderPlot({
+    d <- clicked_shot_data()
+    net_plot(point = if (nrow(d) == 1 && !is.na(d$net_x[1]) && !is.na(d$net_y[1])) list(x = d$net_x[1], y = d$net_y[1]) else NULL)
+  })
   output$clicked_shot <- renderDT({
     d <- clicked_shot_data() %>% round_shot_display()
     
-    if (nrow(d) > 0 && profile()$role == "Player" && "player" %in% names(d)) {
+    if (nrow(d) > 0 && profile()$role == "Player" && !isTRUE(profile()$show_player_data) && "player" %in% names(d)) {
       d$player <- "Anonymous"
     }
     
