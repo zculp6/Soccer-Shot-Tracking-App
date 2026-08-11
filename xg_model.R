@@ -26,6 +26,19 @@ standardize_xg_features <- function(data) {
   data
 }
 
+xg_model_terms <- c("distance_to_goal", "angle_to_goal", "shotType", "typeOfAttack", "typeOfAssist", "sideOfAttack", "domVSnondom")
+
+xg_formula <- function(extra_terms = character()) {
+  stats::as.formula(paste("goal ~", paste(c(xg_model_terms, extra_terms), collapse = " + ")))
+}
+
+prepare_xg_training_data <- function(data, extra_terms = character()) {
+  keep_cols <- intersect(c("goal", xg_model_terms, extra_terms), names(data))
+  data <- data[stats::complete.cases(data[, keep_cols]), ]
+  data$goal <- factor(ifelse(data$goal == 1, "goal", "no_goal"), levels = c("no_goal", "goal"))
+  data
+}
+
 # Random Forest Grid: 10 distinct options for the 'mtry' parameter (features randomly sampled at each split)
 rf_grid <- expand.grid(mtry = seq(1, 10, by = 1))
 
@@ -49,16 +62,10 @@ train_xg_model <- function(data, folds = 5, seed = 42, model_path = "xg_model.rd
   set.seed(seed)
   model_data <- standardize_xg_features(data)
   
-  keep_cols <- c("goal", "distance_to_goal", "angle_to_goal", "shotType", "typeOfAttack", "typeOfAssist", "sideOfAttack", "domVSnondom")
-  keep_cols <- intersect(keep_cols, names(model_data))
-  
-  model_data <- model_data[stats::complete.cases(model_data[, keep_cols]), ]
-  model_data$goal <- factor(ifelse(model_data$goal == 1, "goal", "no_goal"), levels = c("no_goal", "goal"))
+  model_data <- prepare_xg_training_data(model_data)
+  formula <- xg_formula()
   
   ctrl <- caret::trainControl(method = "cv", number = folds, classProbs = TRUE, summaryFunction = caret::twoClassSummary, savePredictions = "final")
-  
-  formula_str <- paste("goal ~", paste(keep_cols[keep_cols != "goal"], collapse = " + "))
-  formula <- stats::as.formula(formula_str)
   
   # Try/catch blocks bypass failed models instead of halting execution
   candidates <- list(
@@ -81,23 +88,20 @@ train_xg_model <- function(data, folds = 5, seed = 42, model_path = "xg_model.rd
 }
 
 train_psxg_model <- function(data, folds = 5, seed = 42, model_path = "psxg_model.rds") {
+  missing <- required_xg_packages[!vapply(required_xg_packages, requireNamespace, logical(1), quietly = TRUE)]
+  if (length(missing) > 0) stop("Install packages for model training: ", paste(missing, collapse = ", "))
+  
   set.seed(seed)
-  data$net_x <- suppressWarnings(as.numeric(data$net_x))
-  data$net_y <- suppressWarnings(as.numeric(data$net_y))
-  goal_width <- get0("GOAL_WIDTH", ifnotfound = 24)
-  goal_height <- get0("GOAL_HEIGHT", ifnotfound = 8)
-  
-  model_data <- data[!is.na(data$net_x) & !is.na(data$net_y), ]
-  model_data$center_distance <- sqrt((model_data$net_x / (goal_width / 2))^2 + ((model_data$net_y - goal_height / 2) / (goal_height / 2))^2)
-  model_data$goal <- ifelse(model_data$Result == "GOAL" | (!is.na(model_data$goals.x) & model_data$goals.x == 1), 1, 0)
-  
-  model_data <- model_data[stats::complete.cases(model_data[, c("goal", "center_distance", "net_x", "net_y")]), ]
-  model_data$goal <- factor(ifelse(model_data$goal == 1, "goal", "no_goal"), levels = c("no_goal", "goal"))
+  model_data <- standardize_xg_features(data)
+  model_data$net_x <- suppressWarnings(as.numeric(model_data$net_x))
+  model_data$net_y <- suppressWarnings(as.numeric(model_data$net_y))
+  model_data <- model_data[!is.na(model_data$net_x) & !is.na(model_data$net_y), ]
+  model_data <- prepare_xg_training_data(model_data, extra_terms = c("net_x", "net_y"))
   
   if (nrow(model_data) < 50) return(NULL)
   
-  ctrl <- caret::trainControl(method = "cv", number = folds, classProbs = TRUE, summaryFunction = caret::twoClassSummary)
-  formula <- goal ~ center_distance + net_x + net_y
+  ctrl <- caret::trainControl(method = "cv", number = folds, classProbs = TRUE, summaryFunction = caret::twoClassSummary, savePredictions = "final")
+  formula <- xg_formula(extra_terms = c("net_x", "net_y"))
   
   candidates <- list(
     logistic = try(caret::train(formula, data = model_data, method = "glm", family = stats::binomial(), metric = "ROC", trControl = ctrl), silent = TRUE),
@@ -144,7 +148,9 @@ predict_psxg <- function(data, fallback = NULL, model_path = "psxg_model.rds") {
   
   if (file.exists(model_path)) {
     artifact <- readRDS(model_path)
-    features <- data.frame(net_x = net_x, net_y = net_y, center_distance = center_distance)
+    features <- standardize_xg_features(data)
+    features$net_x <- net_x
+    features$net_y <- net_y
     preds <- try(stats::predict(artifact$model, newdata = features, type = "prob")[, "goal"], silent = TRUE)
     if (!inherits(preds, "try-error")) {
       psxg <- as.numeric(preds)
@@ -177,11 +183,13 @@ retrain_xg_if_new_shots <- function(data_path = "XGStats.csv", model_path = "xg_
   if (!requireNamespace("readr", quietly = TRUE)) stop("Install readr to load CSV data.")
   shots <- readr::read_csv(data_path, show_col_types = FALSE)
   current_count <- nrow(shots)
+  shots_with_net <- shots[!is.na(suppressWarnings(as.numeric(shots$net_x))) & !is.na(suppressWarnings(as.numeric(shots$net_y))), ]
+  current_net_count <- nrow(shots_with_net)
   
-  state <- if (file.exists(state_path)) readRDS(state_path) else list(shot_count = 0)
-  previous_count <- state$shot_count
+  state <- if (file.exists(state_path)) readRDS(state_path) else list(shot_count = 0, net_shot_count = 0)
+  previous_count <- if (!is.null(state$shot_count)) state$shot_count else 0
   
-  if (current_count >= previous_count + 25) {
+  if (current_count >= previous_count + 50 && current_net_count >= 50) {
     
     # Define temporary file paths for atomic saves
     temp_model_path <- paste0("temp_", model_path)
@@ -193,18 +201,15 @@ retrain_xg_if_new_shots <- function(data_path = "XGStats.csv", model_path = "xg_
       file.rename(temp_model_path, model_path)
     }
     
-    # Train PSxG model if sufficient data exists
-    psxg_data <- shots[!is.na(shots$net_x) & !is.na(shots$net_y), ]
-    if (nrow(psxg_data) >= 50) {
-      train_psxg_model(shots, model_path = temp_psxg_path)
-      if (file.exists(temp_psxg_path)) {
-        file.rename(temp_psxg_path, psxg_model_path)
-      }
+    # Train PSxG model from shots that have net coordinates.
+    train_psxg_model(shots_with_net, model_path = temp_psxg_path)
+    if (file.exists(temp_psxg_path)) {
+      file.rename(temp_psxg_path, psxg_model_path)
     }
     
     # Update state file atomically
     temp_state_path <- paste0("temp_", state_path)
-    saveRDS(list(shot_count = current_count, trained_at = Sys.time()), temp_state_path)
+    saveRDS(list(shot_count = current_count, net_shot_count = current_net_count, trained_at = Sys.time()), temp_state_path)
     if (file.exists(temp_state_path)) {
       file.rename(temp_state_path, state_path)
     }
