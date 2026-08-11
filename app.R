@@ -78,8 +78,8 @@ recompute_game_labels <- function(data) {
 standardize_shots <- function(data) {
   data <- as.data.frame(data)
   
-  # Remove any auto-generated unnamed columns (e.g., ...1, ...2)
-  data <- data[, !grepl("^\\.\\.\\.", names(data)), drop = FALSE]
+  # Remove any auto-generated index columns from CSV/spreadsheet exports.
+  data <- data[, !names(data) %in% c("", "X.1", "row_id"), drop = FALSE]
   
   for (col in REQUIRED_UPLOAD_COLUMNS) if (!col %in% names(data)) data[[col]] <- NA
   data[] <- lapply(data, clean_text)
@@ -546,9 +546,9 @@ net_plot <- function(data = NULL, point = NULL) {
     annotate("point", x = c(-GOAL_WIDTH / 2, GOAL_WIDTH / 2), y = c(0, 0), colour = "white", size = 5) +
     {if (!is.null(data) && nrow(data) > 1) stat_density_2d(data = data, aes(net_x, net_y, fill = after_stat(level)), geom = "polygon", alpha = .45) else NULL} +
     # Render non-goals as white dots
-    {if (!is.null(data) && nrow(data) > 0) geom_point(data = filter(data, Result != "GOAL" & (is.na(goals.x) | goals.x != 1)), aes(net_x, net_y), colour = "white", alpha = .75, size = 2) else NULL} +
-    # Render goals as yellow stars (shape = 8)
-    {if (!is.null(data) && nrow(data) > 0) geom_point(data = filter(data, Result == "GOAL" | goals.x == 1), aes(net_x, net_y), colour = "#FFD700", shape = 8, size = 8, stroke = 1.6) else NULL} +
+    {if (!is.null(data) && nrow(data) > 0) geom_point(data = filter(data, Result != "GOAL" & (is.na(goals.x) | goals.x != 1)), aes(net_x, net_y), colour = "white", alpha = .75, size = 1.33) else NULL} +
+    # Render goals as yellow points
+    {if (!is.null(data) && nrow(data) > 0) geom_point(data = filter(data, Result == "GOAL" | goals.x == 1), aes(net_x, net_y), colour = "#FFD700", size = 5.33) else NULL} +
     {if (!is.null(point) && !is.null(point$x) && !is.null(point$y) && !is.na(point$x) && !is.na(point$y)) {
       list(
         annotate("point", x = point$x, y = point$y, shape = 21, size = 7, fill = "white", colour = "black", stroke = 1.4),
@@ -648,6 +648,15 @@ ui <- page_navbar(
       table.dataTable.no-footer {
         border-bottom: 0 !important;
       }
+      #recent_shots .form-control,
+      #recent_shots select,
+      #recent_shots input {
+        min-width: 9rem;
+      }
+      #recent_shots .dataTables_scrollHeadInner,
+      #recent_shots table.dataTable {
+        width: max-content !important;
+      }
       @media (max-width: 768px) {
         .bslib-sidebar-layout {
           --_sidebar-width: min(100%, 22rem);
@@ -678,6 +687,7 @@ ui <- page_navbar(
                                                        nav_panel("Team stats",
                                                                  radioButtons("team_stat_view", "Opponent View:", choices = c("Total Opponent", "Individual Opponent Teams"), inline = TRUE),
                                                                  DTOutput("team_stats"),
+                                                                 br(),
                                                                  hr(),
                                                                  fluidRow(
                                                                    column(4, selectInput("team_pie_var", "Distribution Variable", choices = c("Shot type" = "shotType", "Attack side" = "sideOfAttack", "Assist type" = "typeOfAssist", "Attack type" = "typeOfAttack", "Result" = "Result")))
@@ -686,6 +696,7 @@ ui <- page_navbar(
                                                        ),
                                                        nav_panel("Player stats", value = "player_stats_tab",
                                                                  DTOutput("player_stats"),
+                                                                 br(),
                                                                  hr(),
                                                                  fluidRow(
                                                                    column(4, selectInput("player_pie_var", "Distribution Variable", choices = c("Shot type" = "shotType", "Attack side" = "sideOfAttack", "Assist type" = "typeOfAssist", "Attack type" = "typeOfAttack", "Result" = "Result")))
@@ -734,7 +745,12 @@ ui <- page_navbar(
             conditionalPanel("!output.has_data", div(class = "alert alert-warning", role = "alert", "No data exists. Upload or enter data in the Add/Upload shots tab.")),
             conditionalPanel("output.has_data",
                              layout_sidebar(
-                               sidebar = sidebar(selectInput("single_game", "Individual game shot chart", choices = NULL), title = "Game", open = TRUE), 
+                               sidebar = sidebar(
+                                 selectInput("game_chart_scope", "Shot chart view", choices = c("All Games" = "all", "Filter by Year" = "year", "Individual Game" = "game")),
+                                 conditionalPanel("input.game_chart_scope == 'year'", selectInput("single_game_year", "Year", choices = NULL)),
+                                 conditionalPanel("input.game_chart_scope == 'game'", selectInput("single_game", "Individual game shot chart", choices = NULL)),
+                                 title = "Game", open = TRUE
+                               ), 
                                p(strong("Note: Click a point on the shot chart below to see shot details.")), 
                                plotOutput("shot_chart", click = "shot_chart_click", width = "100%", height = "60vh"), 
                                uiOutput("clicked_net_ui"), 
@@ -835,6 +851,7 @@ server <- function(input, output, session) {
       updateSelectInput(session, paste0(id, "-attack"), choices = unname(sort(unique(data$typeOfAttack))))
     }
     updateSelectInput(session, "single_game", choices = unname(sort(unique(data$Game))))
+    updateSelectInput(session, "single_game_year", choices = unname(sort(unique(stats::na.omit(data$year)))))
     updateSelectInput(session, "basic_opponents", choices = unname(sort(unique(stats::na.omit(data$Opponent)))))
     updateSelectInput(session, "player_pie_player", choices = unname(sort(unique(data$player[data$Team == "TEAM"]))))
     
@@ -1183,7 +1200,7 @@ server <- function(input, output, session) {
     result <- round_xg_columns(bind_rows(my_team, opponent))
     if (!psxg_available()) result <- result %>% select(-any_of("PSxG"))
     
-    # Added selection = "single" so we can capture the clicked row
+    # Added selection = "single" so we can capture the clicked row.
     datatable(result, selection = "single", options = list(dom = "t"), rownames = FALSE)
   })
   
@@ -1561,9 +1578,27 @@ server <- function(input, output, session) {
   output$penalty_grid <- renderPlot({ zone_grid_plot(penalty_data(), NULL, title = "Penalty Net Distribution") })
   output$penalty_heat <- renderPlot({ net_plot(penalty_data() %>% filter(!is.na(net_x), !is.na(net_y))) })
   
-  selected_game <- reactive(if (!is.null(input$single_game) && nzchar(input$single_game)) filter(game_data(), Game == input$single_game) else game_data())
+  selected_game <- reactive({
+    data <- game_data()
+    scope <- input$game_chart_scope %||% "all"
+    if (identical(scope, "year") && !is.null(input$single_game_year) && nzchar(input$single_game_year)) {
+      data <- data %>% filter(year == suppressWarnings(as.integer(input$single_game_year)))
+    } else if (identical(scope, "game") && !is.null(input$single_game) && nzchar(input$single_game)) {
+      data <- data %>% filter(Game == input$single_game)
+    }
+    data
+  })
   scoreline_text <- reactive({
-    data <- selected_game(); paste0("TEAM ", sum(data$goals.x[data$Team == "TEAM"], na.rm = TRUE), " - ", sum(data$goals.x[data$Team == "OPPONENT"], na.rm = TRUE), " OPPONENT")
+    data <- selected_game()
+    opponent_label <- "Opponent"
+    if (identical(input$game_chart_scope %||% "all", "game")) {
+      opponents <- unique(stats::na.omit(data$Opponent[data$Team == "OPPONENT"]))
+      if (length(opponents) == 1) opponent_label <- opponents[[1]]
+    }
+    paste0(
+      team_display_name(), " ", sum(data$goals.x[data$Team == "TEAM"], na.rm = TRUE),
+      " - ", sum(data$goals.x[data$Team == "OPPONENT"], na.rm = TRUE), " ", opponent_label
+    )
   })
   
   output$shot_chart <- renderPlot({
@@ -1573,12 +1608,13 @@ server <- function(input, output, session) {
       geom_point(
         data = chart_data %>% filter(Result == "GOAL", !is.na(net_x), !is.na(net_y)),
         aes(X, Y),
-        colour = "#FFD700", shape = 8, size = 8, stroke = 1.6, show.legend = FALSE
+        colour = "#FFD700", size = 5, show.legend = FALSE
       ) +
       scale_colour_manual(values = c(GOAL = "#FFD700", SAVED = "#2C7FB8", MISSED = "#666666", BLOCKED = "#D95F0E"), drop = FALSE) +
-      scale_size_continuous(range = c(4, 12)) +
+      scale_size_continuous(range = c(2.67, 8)) +
       annotate("label", x = FIELD_LENGTH / 2, y = FIELD_WIDTH - 4, label = scoreline_text(), size = 6, fill = "white") +
-      labs(colour = "Result", size = "xG")
+      labs(colour = "Result", size = "xG") +
+      theme(legend.title = element_text(size = 14), legend.text = element_text(size = 14))
   })
   
   clicked_shot_data <- reactive({
@@ -1779,10 +1815,10 @@ server <- function(input, output, session) {
   observeEvent(input$recent_shots_cell_edit, {
     req(profile()$role == "Coach")
     info <- input$recent_shots_cell_edit
-    display <- shots() %>% mutate(row_id = row_number(), .before = 1) %>% 
-      select(-any_of(c("zone", "goals.x", "goals.y", "sideOfAttackGrouped", "h_a", "Game", "safe_year", "suffix", "game_id", "safe_opp")))
+    display <- shots() %>% 
+      select(-any_of(c("", "X.1", "row_id", "zone", "goals.x", "goals.y", "sideOfAttackGrouped", "h_a", "Game", "safe_year", "suffix", "game_id", "safe_opp")))
     col_name <- names(display)[info$col + 1]
-    if (is.null(col_name) || col_name == "row_id") return()
+    if (is.null(col_name)) return()
     data <- shots()
     data[info$row, col_name] <- DT::coerceValue(info$value, data[[col_name]][info$row])
     set_shots(standardize_shots(data)); save_user_data(shots(), profile()$email, profile()$signed_in)
@@ -1842,7 +1878,7 @@ server <- function(input, output, session) {
     req(profile()$role == "Coach")
     shots() %>%
       mutate(row_id = row_number(), .before = 1) %>%
-      select(row_id, Date, everything(), -any_of(c("zone", "goals.x", "goals.y", "sideOfAttackGrouped", "h_a", "Game", "safe_year", "suffix", "game_id", "safe_opp"))) %>%
+      select(Date, everything(), -any_of(c("", "X.1", "row_id", "zone", "goals.x", "goals.y", "sideOfAttackGrouped", "h_a", "Game", "safe_year", "suffix", "game_id", "safe_opp"))) %>%
       mutate(across(where(is.character), as.factor)) %>%
       round_shot_display() %>%
       datatable(
