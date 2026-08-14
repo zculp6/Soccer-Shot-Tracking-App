@@ -68,19 +68,18 @@ recompute_game_labels <- function(data) {
   }
   
   data <- data %>%
-    arrange(Date) %>% # Ensure strict chronological order
+    arrange(Date) %>% 
     group_by(year, Opponent) %>%
     mutate(
-      # Safely assign a chronological rank per opponent per year
       game_id = dense_rank(Date),
-      # Keep suffix blank if it's the first game (or if date is NA)
       suffix = ifelse(is.na(game_id) | game_id <= 1, "", paste0(" (", game_id, ")")),
-      # Prevent "NA" from rendering if year or Opponent is missing
       safe_year = ifelse(is.na(year), "Unknown", year),
       safe_opp = ifelse(is.na(Opponent), "Unknown", Opponent),
       Game = paste0(safe_year, " - ", safe_opp, suffix)
     ) %>%
     ungroup() %>%
+    # Automatically enforce sorting by Match and Minute so duplicates group logically
+    arrange(Game, Minute) %>%
     as.data.frame()
   
   data
@@ -426,6 +425,29 @@ pairwise_comparisons <- function(clean_data, column) {
     )
 }
 
+run_advanced_tests <- function(data) {
+  data <- standardize_xg_features(data)
+  data$side_group <- ifelse(data$sideOfAttack %in% c("LEFT", "RIGHT"), "SIDE", as.character(data$sideOfAttack))
+  tests <- list()
+  clean_for_test <- function(dataset, column) {
+    dataset[!is.na(dataset[[column]]) & !dataset[[column]] %in% c("", "N/A", "NA", "UNKNOWN") & !is.na(dataset$goal), , drop = FALSE]
+  }
+  
+  safe_aov <- function(formula, dataset) try(summary(stats::aov(formula, data = dataset)), silent = TRUE)
+  safe_t <- function(formula, dataset) try(stats::t.test(formula, data = dataset), silent = TRUE)
+  tests$assist_goal_anova <- safe_aov(goal ~ typeOfAssist, clean_for_test(data, "typeOfAssist"))
+  tests$side_middle_goal_anova <- safe_aov(goal ~ side_group, clean_for_test(data, "side_group"))
+  tests$left_right_middle_goal_anova <- safe_aov(goal ~ sideOfAttack, clean_for_test(data, "sideOfAttack"))
+  attack_data <- clean_for_test(data, "typeOfAttack")
+  tests$attack_type_goal_anova <- safe_aov(goal ~ typeOfAttack, attack_data[attack_data$typeOfAttack != "PENALTY", ])
+  tests$shot_type_goal_anova <- safe_aov(goal ~ shotType, clean_for_test(data, "shotType"))
+  foot_data <- clean_for_test(data, "domVSnondom")
+  foot_data <- foot_data[foot_data$domVSnondom %in% c("DOMINANT", "NONDOMINANT"), ]
+  foot_data$domVSnondom <- factor(foot_data$domVSnondom) 
+  tests$dominant_foot_t_test <- safe_t(goal ~ domVSnondom, foot_data)
+  tests
+}
+
 goal_rate_by_group <- function(data, column) {
   data %>%
     filter(!is.na(.data[[column]]), !.data[[column]] %in% c("", "N/A", "NA", "UNKNOWN"), !is.na(goal)) %>%
@@ -556,10 +578,18 @@ net_plot <- function(data = NULL, point = NULL) {
     annotate("segment", x = -GOAL_WIDTH / 2, xend = GOAL_WIDTH / 2, y = GOAL_HEIGHT, yend = GOAL_HEIGHT, colour = "white", linewidth = 2) +
     annotate("point", x = c(-GOAL_WIDTH / 2, GOAL_WIDTH / 2), y = c(0, 0), colour = "white", size = 5) +
     {if (!is.null(data) && nrow(data) > 1) stat_density_2d(data = data, aes(net_x, net_y, fill = after_stat(level)), geom = "polygon", alpha = .45) else NULL} +
-    # Render non-goals as white dots
+    # Look for the geom_point lines inside net_plot and reduce size parameters
     {if (!is.null(data) && nrow(data) > 0) geom_point(data = filter(data, Result != "GOAL" & (is.na(goals.x) | goals.x != 1)), aes(net_x, net_y), colour = "white", alpha = .75, size = 1.33) else NULL} +
-    # Render goals as yellow points
-    {if (!is.null(data) && nrow(data) > 0) geom_point(data = filter(data, Result == "GOAL" | goals.x == 1), aes(net_x, net_y), colour = "#FFD700", size = 5.33) else NULL} +
+    # Reduced yellow goal dot from 5.33 to 3.0
+    {if (!is.null(data) && nrow(data) > 0) geom_point(data = filter(data, Result == "GOAL" | goals.x == 1), aes(net_x, net_y), colour = "#FFD700", size = 3.0) else NULL} +
+    {if (!is.null(point) && !is.null(point$x) && !is.null(point$y) && !is.na(point$x) && !is.na(point$y)) {
+      list(
+        # Reduced clicked dot outline and center size
+        annotate("point", x = point$x, y = point$y, shape = 21, size = 5, fill = "white", colour = "black", stroke = 1.4),
+        annotate("point", x = point$x, y = point$y, shape = 16, size = 3, colour = "black"),
+        annotate("text", x = point$x, y = point$y, label = "⚽", size = 5, vjust = 0.35)
+      )
+    } else NULL} +
     {if (!is.null(point) && !is.null(point$x) && !is.null(point$y) && !is.na(point$x) && !is.na(point$y)) {
       list(
         annotate("point", x = point$x, y = point$y, shape = 21, size = 7, fill = "white", colour = "black", stroke = 1.4),
@@ -603,7 +633,8 @@ zone_summary <- function(data, selected = NULL, is_gk = FALSE) {
   }
 }
 
-zone_grid_plot <- function(data, selected = NULL, title = "Net location distribution", is_gk = FALSE) {
+zone_grid_plot <- function(data, selected = NULL, title = "Net location distribution", is_gk = FALSE,
+                           plot_width = NULL, plot_height = NULL) {
   zs <- zone_summary(data, selected, is_gk) %>% 
     mutate(
       zone_num = as.integer(gsub("Zone ", "", zone)),
@@ -619,11 +650,46 @@ zone_grid_plot <- function(data, selected = NULL, title = "Net location distribu
   
   fill_label <- if(is_gk) "Save %" else "Goal %"
   
+  # --- Dynamically size the zone labels so they always fit inside their box ---
+  # Data-space dimensions of the plotted grid are fixed by the geometry above.
+  data_w <- 36  # x range: -18 to 18
+  data_h <- 16  # y range: -4 to 12
+  box_w  <- 6   # width of a single zone box, in data units
+  box_h  <- 4   # height of a single zone box, in data units
+  
+  if (!is.null(plot_width) && !is.null(plot_height) && plot_width > 0 && plot_height > 0) {
+    # coord_fixed() enforces a 1:1 aspect ratio, so the panel gets
+    # letterboxed to whichever screen dimension is the tighter constraint.
+    px_per_unit <- min(plot_width / data_w, plot_height / data_h)
+  } else {
+    # Fallback used before client dimensions are available (e.g. first render)
+    px_per_unit <- 15
+  }
+  
+  box_w_px <- box_w * px_per_unit
+  box_h_px <- box_h * px_per_unit
+  
+  # Labels are two lines: "xx%" / "(n goals, n shots)" - find the longest line
+  # actually present so text is sized to the real content, not a guess.
+  label_lines <- unlist(strsplit(zs$Label, "\n", fixed = TRUE))
+  max_chars <- max(nchar(label_lines), 1)
+  n_lines <- 2
+  
+  # Cap the font size (points) so both lines fit vertically AND the longest
+  # line fits horizontally; ~0.58 char-width and ~1.25 line-height are
+  # conservative approximations for a bold sans-serif face.
+  size_from_height <- (box_h_px * 0.85) / (n_lines * 1.25)
+  size_from_width  <- (box_w_px * 0.90) / (max_chars * 0.58)
+  
+  text_size_pt <- max(6, min(size_from_height, size_from_width, 16))
+  text_size_mm <- text_size_pt / (72.27 / 25.4)  # geom_text's 'size' is in mm
+  
   ggplot(zs) + 
     annotate("rect", xmin = -18, xmax = 18, ymin = -4, ymax = 12, fill = "#0b4f6c", colour = NA, alpha = 0.95) +
     annotate("rect", xmin = -18, xmax = 18, ymin = -4, ymax = 0, fill = "#56a832", colour = NA) +
     geom_rect(aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = Percent), colour = "black", linewidth = 0.5) + 
-    geom_text(aes(x = x_center, y = y_center, label = Label), colour = "white", fontface = "bold") + 
+    geom_text(aes(x = x_center, y = y_center, label = Label), colour = "black", fontface = "bold", 
+              size = text_size_mm, lineheight = 0.9) + 
     geom_segment(aes(x = -12, xend = -12, y = 0, yend = 8), color = "white", linewidth = 2) + 
     geom_segment(aes(x = 12, xend = 12, y = 0, yend = 8), color = "white", linewidth = 2) + 
     geom_segment(aes(x = -12, xend = 12, y = 8, yend = 8), color = "white", linewidth = 2) + 
@@ -662,11 +728,18 @@ ui <- page_navbar(
       #recent_shots .form-control,
       #recent_shots select,
       #recent_shots input {
-        min-width: 9rem;
+        width: auto !important;
+        min-width: 3rem;
+        max-width: none;
+      }
+      #recent_shots th,
+      #recent_shots td {
+        white-space: nowrap;
       }
       #recent_shots .dataTables_scrollHeadInner,
       #recent_shots table.dataTable {
         width: max-content !important;
+        table-layout: auto !important;
       }
       @media (max-width: 768px) {
         .bslib-sidebar-layout {
@@ -680,6 +753,12 @@ ui <- page_navbar(
         .dataTables_wrapper .dataTables_info {
           float: none;
           text-align: center;
+        }
+        .dataTables_wrapper {
+          margin-bottom: 1.5rem !important; 
+        }
+        .tab-content {
+          padding-bottom: 2rem;
         }
       }
     "))
@@ -745,9 +824,9 @@ ui <- page_navbar(
                                  nav_panel("Penalties", 
                                            uiOutput("penalty_team_filter_ui"),
                                            fluidRow(
-                                             column(4, h5("Penalty Goal %"), DTOutput("penalty_goal_rates")),
-                                             column(8, uiOutput("penalty_targets_ui"))
-                                           ))
+                                             column(12, h5("Penalty Goal %"), DTOutput("penalty_goal_rates"))
+                                           ),
+                                           uiOutput("penalty_targets_ui"))
                                )
                              )
             )
@@ -925,7 +1004,6 @@ server <- function(input, output, session) {
                      condition = "input.auth_mode == 'Sign Up'",
                      passwordInput("coach_password_confirm", "Confirm Password")
                    ),
-                   helpText("Password hashing and SQL validation note: user credentials will be stored in a SQL table with SHA-256/bcrypt hashes."), 
                    actionButton("coach_submit", "Submit", class = "btn-primary")
                  )
           ),
@@ -942,7 +1020,7 @@ server <- function(input, output, session) {
                  )
           )
         ),
-        p("Players who sign in with the team code can review shared dashboards without seeing coach email. Player access hides add/upload shots and edit shot data; coaches can also hide player-level data.")
+        
       )
     }
   })
@@ -1552,6 +1630,19 @@ server <- function(input, output, session) {
     datatable(summary, options = list(dom = "t"), rownames = FALSE)
   })
   
+  output$penalty_targets_ui <- renderUI({
+    data <- penalty_data()
+    
+    if (all(is.na(data$net_x)) && all(is.na(data$net_y))) {
+      h4("No shot location data was provided for penalties")
+    } else {
+      fluidRow(
+        column(6, plotOutput("penalty_grid", height = "40vh")),
+        column(6, plotOutput("penalty_heat", height = "40vh"))
+      )
+    }
+  })
+  
   output$shooting_targets_ui <- renderUI({
     data <- advanced_data() %>% filter(Team == "TEAM")
     
@@ -1580,8 +1671,16 @@ server <- function(input, output, session) {
     }
   })
   
-  output$shooting_grid <- renderPlot(zone_grid_plot(advanced_data() %>% filter(Team == "TEAM"), NULL, "Shooting net distribution"))
-  output$gk_grid <- renderPlot(zone_grid_plot(advanced_data() %>% filter(Team == "OPPONENT"), NULL, "Goalkeeper shots faced distribution", is_gk = TRUE))
+  output$shooting_grid <- renderPlot({
+    zone_grid_plot(advanced_data() %>% filter(Team == "TEAM"), NULL, "Shooting net distribution",
+                   plot_width = session$clientData$output_shooting_grid_width,
+                   plot_height = session$clientData$output_shooting_grid_height)
+  })
+  output$gk_grid <- renderPlot({
+    zone_grid_plot(advanced_data() %>% filter(Team == "OPPONENT"), NULL, "Goalkeeper shots faced distribution", is_gk = TRUE,
+                   plot_width = session$clientData$output_gk_grid_width,
+                   plot_height = session$clientData$output_gk_grid_height)
+  })
   
   output$shooting_heat <- renderPlot(net_plot(advanced_data() %>% filter(Team == "TEAM", !is.na(net_x), !is.na(net_y))))
   output$gk_heat <- renderPlot(net_plot(advanced_data() %>% filter(Team == "OPPONENT", !is.na(net_x), !is.na(net_y))))
@@ -1590,7 +1689,11 @@ server <- function(input, output, session) {
     selectInput("penalty_team_filter", "Select Team", choices = c(team_display_name(), "Opponent"))
   })
   
-  output$penalty_grid <- renderPlot({ zone_grid_plot(penalty_data(), NULL, title = "Penalty Net Distribution") })
+  output$penalty_grid <- renderPlot({
+    zone_grid_plot(penalty_data(), NULL, title = "Penalty Net Distribution",
+                   plot_width = session$clientData$output_penalty_grid_width,
+                   plot_height = session$clientData$output_penalty_grid_height)
+  })
   output$penalty_heat <- renderPlot({ net_plot(penalty_data() %>% filter(!is.na(net_x), !is.na(net_y))) })
   
   selected_game <- reactive({
@@ -1610,9 +1713,13 @@ server <- function(input, output, session) {
       opponents <- unique(stats::na.omit(data$Opponent[data$Team == "OPPONENT"]))
       if (length(opponents) == 1) opponent_label <- opponents[[1]]
     }
+    # Stack names and scores vertically to prevent mobile cutoff
     paste0(
-      team_display_name(), " ", sum(data$goals.x[data$Team == "TEAM"], na.rm = TRUE),
-      " - ", sum(data$goals.x[data$Team == "OPPONENT"], na.rm = TRUE), " ", opponent_label
+      team_display_name(), "\n",
+      sum(data$goals.x[data$Team == "TEAM"], na.rm = TRUE),
+      " - ",
+      sum(data$goals.x[data$Team == "OPPONENT"], na.rm = TRUE), "\n",
+      opponent_label
     )
   })
   
@@ -1627,9 +1734,11 @@ server <- function(input, output, session) {
       ) +
       scale_colour_manual(values = c(GOAL = "#FFD700", SAVED = "#2C7FB8", MISSED = "#666666", BLOCKED = "#D95F0E"), drop = FALSE) +
       scale_size_continuous(range = c(2.67, 8)) +
-      annotate("label", x = FIELD_LENGTH / 2, y = FIELD_WIDTH - 4, label = scoreline_text(), size = 6, fill = "white") +
+      # Updated to accommodate vertically stacked text
+      annotate("label", x = FIELD_LENGTH / 2, y = FIELD_WIDTH - 5, label = scoreline_text(), size = 5, fill = "white", lineheight = 0.9) +
       labs(colour = "Result", size = "xG") +
-      theme(legend.title = element_text(size = 14), legend.text = element_text(size = 14))
+      # Moves legend to bottom to prevent field shrinking on mobile
+      theme(legend.position = "bottom", legend.title = element_text(size = 14), legend.text = element_text(size = 14))
   })
   
   clicked_shot_data <- reactive({
@@ -1725,26 +1834,25 @@ server <- function(input, output, session) {
         tags$li(strong("Result*: "), "The outcome of the shot (e.g., GOAL, SAVED, MISSED, BLOCKED)."),
         tags$li(strong("X*: "), "The X coordinate of the shot origin (0 to 120)."),
         tags$li(strong("Y*: "), "The Y coordinate of the shot origin (0 to 75)."),
-        tags$li(strong("player*: "), "Name of the player who took the shot."),
-        tags$li(strong("h_a*: "), "Was your team Home or Away (HOME/AWAY)."),
-        tags$li(strong("situation*: "), "The play situation (e.g., OPEN PLAY, SET PIECE)."),
-        tags$li(strong("shotType*: "), "The body part/type (e.g., RIGHTFOOT, LEFTFOOT, HEADER)."),
-        tags$li(strong("domVSnondom*: "), "Was it on their DOMINANT or NONDOMINANT foot."),
+        tags$li(strong("player: "), "Name of the player who took the shot."),
+        tags$li(strong("h_a: "), "Was your team Home or Away (HOME/AWAY)."),
+        tags$li(strong("situation: "), "The play situation (e.g., OPEN PLAY, SET PIECE)."),
+        tags$li(strong("shotType: "), "The body part/type (e.g., RIGHTFOOT, LEFTFOOT, HEADER)."),
+        tags$li(strong("domVSnondom: "), "Was it on their DOMINANT or NONDOMINANT foot."),
         tags$li(strong("Opponent*: "), "The name of the opposing team."),
-        tags$li(strong("playerAssist*: "), "The name of the player who assisted."),
-        tags$li(strong("typeOfAssist*: "), "Type of assist (e.g., PASS, CUTBACK, THROUGHBALL)."),
-        tags$li(strong("sideOfAttack*: "), "Side the attack came from (LEFT, RIGHT, MIDDLE)."),
-        tags$li(strong("PossesionWon*: "), "Where possession was won."),
-        tags$li(strong("typeOfAttack*: "), "The build-up type (e.g., POSSESSION, TRANSITION)."),
+        tags$li(strong("playerAssist: "), "The name of the player who assisted."),
+        tags$li(strong("typeOfAssist: "), "Type of assist (e.g., PASS, CUTBACK, THROUGHBALL)."),
+        tags$li(strong("sideOfAttack: "), "Side the attack came from (LEFT, RIGHT, MIDDLE)."),
+        tags$li(strong("PossesionWon: "), "Where possession was won."),
+        tags$li(strong("typeOfAttack: "), "The build-up type (e.g., POSSESSION, TRANSITION)."),
         tags$li(strong("year*: "), "The year of the season/game."),
-        tags$li(strong("sideOfAttackGrouped*: "), "Grouped attack side."),
+        tags$li(strong("sideOfAttackGrouped: "), "Grouped attack side."),
         tags$li(strong("Team*: "), "TEAM or OPPONENT."),
-        tags$li(strong("GK*: "), "The opposing Goalkeeper's name."),
-        tags$li(strong("net_x*: "), "X coordinate of where the ball crossed the goal line."),
-        tags$li(strong("net_y*: "), "Y coordinate of where the ball crossed the goal line."),
-        tags$li(strong("PSxG*: "), "Post-shot expected goals."),
-        tags$li(strong("Date*: "), "Date of the match (e.g., MM/DD/YYYY)."),
-        tags$li(strong("Notes*: "), "Comments about the goal or shot context.")
+        tags$li(strong("GK: "), "The Goalkeeper's name."),
+        tags$li(strong("net_x: "), "X coordinate of where the ball crossed the goal line."),
+        tags$li(strong("net_y: "), "Y coordinate of where the ball crossed the goal line."),
+        tags$li(strong("Date: "), "Date of the match (e.g., MM/DD/YYYY)."),
+        tags$li(strong("Notes: "), "Comments about the goal or shot context.")
       ),
       footer = modalButton("Close"), easyClose = TRUE
     ))
@@ -1852,34 +1960,68 @@ server <- function(input, output, session) {
     
     showModal(modalDialog(
       title = "Edit Shot",
-      selectInput("edit_result", "Result", choices = c("GOAL", "SAVED", "MISSED", "BLOCKED"), selected = row_data$Result),
-      selectInput("edit_situation", "Situation", choices = c("OPEN PLAY", "SET PIECE", "CORNER", "FREE KICK", "PENALTY", "OTHER"), selected = row_data$situation),
-      selectInput("edit_shotType", "Shot type", choices = c("RIGHTFOOT", "LEFTFOOT", "HEADER", "RIGHTVOLLEY", "LEFTVOLLEY", "OTHER"), selected = row_data$shotType),
-      selectInput("edit_typeOfAssist", "Type of assist", choices = c("N/A", "PASS", "THROUGHBALL", "CROSSINAIR", "CUTBACK", "OTHER"), selected = row_data$typeOfAssist),
-      selectInput("edit_sideOfAttack", "Side of attack", choices = c("LEFT", "RIGHT", "MIDDLE", "OTHER"), selected = row_data$sideOfAttack),
-      selectInput("edit_possesionWon", "Possession won", choices = c("DEFENSIVE THIRD", "MIDDLE THIRD", "ATTACKING THIRD", "OTHER"), selected = row_data$PossesionWon),
-      selectInput("edit_typeOfAttack", "Type of attack", choices = c("POSSESSION", "TRANSITION", "RESTART", "THROW-IN", "PENALTY", "OTHER"), selected = row_data$typeOfAttack),
-      textInput("edit_notes", "Notes", value = row_data$Notes),
+      fluidRow(
+        column(6,
+               textInput("edit_opponent", "Opponent", value = row_data$Opponent),
+               numericInput("edit_minute", "Minute", value = row_data$Minute),
+               selectInput("edit_result", "Result", choices = c("GOAL", "SAVED", "MISSED", "BLOCKED"), selected = row_data$Result),
+               numericInput("edit_x", "Field X", value = row_data$X),
+               numericInput("edit_y", "Field Y", value = row_data$Y),
+               textInput("edit_player", "Player", value = row_data$player),
+               selectInput("edit_h_a", "Home/Away", choices = c("", "HOME", "AWAY"), selected = row_data$h_a),
+               selectInput("edit_situation", "Situation", choices = c("OPEN PLAY", "SET PIECE", "CORNER", "FREE KICK", "PENALTY", "OTHER"), selected = row_data$situation),
+               selectInput("edit_shotType", "Shot type", choices = c("RIGHTFOOT", "LEFTFOOT", "HEADER", "RIGHTVOLLEY", "LEFTVOLLEY", "OTHER"), selected = row_data$shotType),
+               selectInput("edit_domVSnondom", "Dom/Non-dom", choices = c("", "DOMINANT", "NONDOMINANT"), selected = row_data$domVSnondom)
+        ),
+        column(6,
+               textInput("edit_playerAssist", "Player Assist", value = row_data$playerAssist),
+               selectInput("edit_typeOfAssist", "Type of assist", choices = c("N/A", "PASS", "THROUGHBALL", "CROSSINAIR", "CUTBACK", "OTHER"), selected = row_data$typeOfAssist),
+               selectInput("edit_sideOfAttack", "Side of attack", choices = c("LEFT", "RIGHT", "MIDDLE", "OTHER"), selected = row_data$sideOfAttack),
+               selectInput("edit_possesionWon", "Possession won", choices = c("DEFENSIVE THIRD", "MIDDLE THIRD", "ATTACKING THIRD", "OTHER"), selected = row_data$PossesionWon),
+               selectInput("edit_typeOfAttack", "Type of attack", choices = c("POSSESSION", "TRANSITION", "RESTART", "THROW-IN", "PENALTY", "OTHER"), selected = row_data$typeOfAttack),
+               numericInput("edit_year", "Year", value = row_data$year),
+               dateInput("edit_date", "Date", value = row_data$Date),
+               textInput("edit_gk", "Goalkeeper", value = row_data$GK),
+               numericInput("edit_net_x", "Net X", value = row_data$net_x),
+               numericInput("edit_net_y", "Net Y", value = row_data$net_y)
+        )
+      ),
+      textInput("edit_notes", "Notes", value = row_data$Notes, width = "100%"),
       footer = tagList(
         modalButton("Cancel"),
         actionButton("save_edit_btn", "Save Changes", class = "btn-primary")
-      )
+      ),
+      size = "l" # Make modal larger to fit rows nicely
     ))
   })
   
-  # Handle saving edits
+  # Save button logic
   observeEvent(input$save_edit_btn, {
     req(profile()$role == "Coach")
     selected <- input$recent_shots_rows_selected
     data <- shots()
     
+    # Inject inputs back into the dataframe row
+    data[selected, "Opponent"] <- input$edit_opponent
+    data[selected, "Minute"] <- input$edit_minute
     data[selected, "Result"] <- input$edit_result
+    data[selected, "X"] <- input$edit_x
+    data[selected, "Y"] <- input$edit_y
+    data[selected, "player"] <- input$edit_player
+    data[selected, "h_a"] <- input$edit_h_a
     data[selected, "situation"] <- input$edit_situation
     data[selected, "shotType"] <- input$edit_shotType
+    data[selected, "domVSnondom"] <- input$edit_domVSnondom
+    data[selected, "playerAssist"] <- input$edit_playerAssist
     data[selected, "typeOfAssist"] <- input$edit_typeOfAssist
     data[selected, "sideOfAttack"] <- input$edit_sideOfAttack
     data[selected, "PossesionWon"] <- input$edit_possesionWon
     data[selected, "typeOfAttack"] <- input$edit_typeOfAttack
+    data[selected, "year"] <- input$edit_year
+    data[selected, "Date"] <- input$edit_date
+    data[selected, "GK"] <- input$edit_gk
+    data[selected, "net_x"] <- input$edit_net_x
+    data[selected, "net_y"] <- input$edit_net_y
     data[selected, "Notes"] <- input$edit_notes
     
     set_shots(standardize_shots(data))
@@ -1893,14 +2035,15 @@ server <- function(input, output, session) {
     req(profile()$role == "Coach")
     shots() %>%
       mutate(row_id = row_number(), .before = 1) %>%
-      select(Date, everything(), -any_of(c("", "X.1", "row_id", "zone", "goals.x", "goals.y", "sideOfAttackGrouped", "h_a", "Game", "safe_year", "suffix", "game_id", "safe_opp"))) %>%
+      # Shift 'Date' to the very end of the selector
+      select(everything(), -any_of(c("", "X.1", "row_id", "zone", "goals.x", "goals.y", "sideOfAttackGrouped", "h_a", "Game", "safe_year", "suffix", "game_id", "safe_opp")), Date) %>%
       mutate(across(where(is.character), as.factor)) %>%
       round_shot_display() %>%
       datatable(
         selection = "multiple", 
         editable = FALSE, 
         filter = "top",   
-        options = list(pageLength = 25, scrollX = TRUE)
+        options = list(pageLength = 25, scrollX = TRUE, autoWidth = FALSE)
       )
   }, server = FALSE)
   
