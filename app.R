@@ -623,12 +623,12 @@ zone_summary <- function(data, selected = NULL, is_gk = FALSE) {
   if (is_gk) {
     zs %>% mutate(
       Percent = ifelse(Shots == 0, 0, round(100 * (Shots - Goals) / Shots, 0)),
-      Label = sprintf("%.0f%%\n(%d GA, %d shots)", Percent, Goals, Shots)
+      Label = sprintf("%.0f%%\n(%d GA, %d Sh)", Percent, Goals, Shots)
     )
   } else {
     zs %>% mutate(
       Percent = ifelse(Shots == 0, 0, round(100 * Goals / Shots, 0)),
-      Label = sprintf("%.0f%%\n(%d goals, %d shots)", Percent, Goals, Shots)
+      Label = sprintf("%.0f%%\n(%d G, %d Sh)", Percent, Goals, Shots)
     )
   }
 }
@@ -704,6 +704,18 @@ ui <- page_navbar(
   title = "Soccer Shot Tracking",
   id = "main_nav",
   header = tags$head(
+    # JavaScript to close hamburger menu automatically when a tab is clicked
+    tags$script(HTML("
+      $(document).ready(function() {
+        $(document).on('click', '.navbar-nav .nav-link', function() {
+          var $navbar = $('.navbar-collapse');
+          if ($navbar.hasClass('show')) {
+            var bsCollapse = new bootstrap.Collapse($navbar[0], {toggle: false});
+            bsCollapse.hide();
+          }
+        });
+      });
+    ")),
     tags$style(HTML("
       #shiny-notification-panel {
         position: fixed !important;
@@ -717,6 +729,8 @@ ui <- page_navbar(
       .dataTables_wrapper {
         width: 100%;
         overflow-x: auto;
+        position: relative;
+        clear: both;
       }
       .dataTables_wrapper .dataTables_scroll,
       .dataTables_wrapper .dataTables_scrollBody {
@@ -741,7 +755,70 @@ ui <- page_navbar(
         width: max-content !important;
         table-layout: auto !important;
       }
-      @media (max-width: 768px) {
+      
+      .shot-chart-container {
+      width: 100%;
+      max-width: 100%;
+      height: 65vh;
+      min-height: 400px;
+      margin: 0;
+      padding: 0;
+    }
+
+    .shot-chart-container .shiny-plot-output {
+      width: 100% !important;
+      height: 100% !important;
+      max-width: 100% !important;
+    }
+
+    /* Mobile shot chart*/
+    @media (max-width: 768px) {
+      .shot-chart-container {
+        width: 100vw;
+        height: 60vh;
+        min-height: 350px;
+        margin-left: calc(-1 * var(--bs-gutter-x, 0.75rem));
+        margin-right: calc(-1 * var(--bs-gutter-x, 0.75rem));
+      }
+
+      .shot-chart-container .shiny-plot-output {
+        width: 100vw !important;
+      }
+    }
+      
+      /* Style the Filters toggle button and push sidebar content down to prevent overlap */
+      .collapse-toggle {
+        background-color: #2c3e50 !important; 
+        color: white !important;
+        border-radius: 4px !important;
+        left: 15px !important;
+        padding: 8px 30px !important;
+        opacity: 1 !important;
+        z-index: 1050;
+      }
+      .collapse-toggle:hover {
+        background-color: #1a252f !important;
+        color: white !important;
+      }
+      .collapse-toggle::after {
+        content: 'Filters';
+        font-family: inherit;
+        font-weight: bold;
+        margin-left: 1px;
+      }
+      /* Push the inner sidebar content down below the toggle */
+      .bslib-sidebar-layout .sidebar-content, 
+      .bslib-sidebar-layout > aside {
+        padding-top: 3.5rem !important; 
+      }
+      
+      /* Push the main content down so the Filter button doesn't overlap text */
+      .bslib-sidebar-layout > .main {
+        padding-top: 3.5rem !important;
+      }
+
+      /* Trigger mobile layout earlier */
+      @media (max-width: 1024px) {
         .bslib-sidebar-layout {
           --_sidebar-width: min(100%, 22rem);
         }
@@ -772,24 +849,35 @@ ui <- page_navbar(
             conditionalPanel("!output.has_data", div(class = "alert alert-warning", role = "alert", "No data exists. Upload or enter data in the Add/Upload shots tab.")),
             conditionalPanel("output.has_data",
                              layout_sidebar(sidebar = sidebar(filter_ui("basic"), selectInput("basic_opponents", "Filter opponents (optional)", choices = NULL, multiple = TRUE), title = "Filter", open = FALSE),
-                                            h4(textOutput("signed_in_as")), p("xG stands for expected goals. PSxG stands for post-shot expected goals. Values are rounded to hundredths."),
+                                            h4(textOutput("signed_in_as")), 
+                                            p("xG stands for expected goals. PSxG stands for post-shot expected goals. Values are rounded to hundredths."),
                                             navset_tab(id = "basic_tabs",
                                                        nav_panel("Team stats",
                                                                  radioButtons("team_stat_view", "Opponent View:", choices = c("Total Opponent", "Individual Opponent Teams"), inline = TRUE),
-                                                                 DTOutput("team_stats"),
-                                                                 br(),
-                                                                 hr(),
-                                                                 fluidRow(
-                                                                   column(4, selectInput("team_pie_var", "Distribution Variable", choices = c("Shot type" = "shotType", "Attack side" = "sideOfAttack", "Assist type" = "typeOfAssist", "Attack type" = "typeOfAttack", "Result" = "Result")))
+                                                                 # Explicit wrapper to contain the table
+                                                                 div(style = "display: block; width: 100%; overflow-x: auto; margin-bottom: 2rem;",
+                                                                     DTOutput("team_stats")
+                                                                 ),
+                                                                 hr(style = "clear: both; margin-top: 2rem;"),
+                                                                 # Explicit block styling to push it below the table
+                                                                 div(style = "clear: both; display: block; width: 100%; padding-top: 15px;",
+                                                                     fluidRow(
+                                                                       column(12, selectInput("team_pie_var", "Distribution Variable", choices = c("Shot type" = "shotType", "Attack side" = "sideOfAttack", "Assist type" = "typeOfAssist", "Attack type" = "typeOfAttack", "Result" = "Result")))
+                                                                     )
                                                                  ),
                                                                  plotOutput("team_pie", height = "45vh")
                                                        ),
                                                        nav_panel("Player stats", value = "player_stats_tab",
-                                                                 DTOutput("player_stats"),
-                                                                 br(),
-                                                                 hr(),
-                                                                 fluidRow(
-                                                                   column(4, selectInput("player_pie_var", "Distribution Variable", choices = c("Shot type" = "shotType", "Attack side" = "sideOfAttack", "Assist type" = "typeOfAssist", "Attack type" = "typeOfAttack", "Result" = "Result")))
+                                                                 # Explicit wrapper to contain the table
+                                                                 div(style = "display: block; width: 100%; overflow-x: auto; margin-bottom: 2rem;",
+                                                                     DTOutput("player_stats")
+                                                                 ),
+                                                                 hr(style = "clear: both; margin-top: 2rem;"),
+                                                                 # Explicit block styling to push it below the table
+                                                                 div(style = "clear: both; display: block; width: 100%; padding-top: 15px;",
+                                                                     fluidRow(
+                                                                       column(12, selectInput("player_pie_var", "Distribution Variable", choices = c("Shot type" = "shotType", "Attack side" = "sideOfAttack", "Assist type" = "typeOfAssist", "Attack type" = "typeOfAttack", "Result" = "Result")))
+                                                                     )
                                                                  ),
                                                                  plotOutput("player_pie", height = "45vh"))
                                             ),
@@ -836,28 +924,68 @@ ui <- page_navbar(
             conditionalPanel("output.has_data",
                              layout_sidebar(
                                sidebar = sidebar(
-                                 selectInput("game_chart_scope", "Shot chart view", choices = c("All Games" = "all", "Filter by Year" = "year", "Individual Game" = "game")),
-                                 conditionalPanel("input.game_chart_scope == 'year'", selectInput("single_game_year", "Year", choices = NULL)),
-                                 conditionalPanel("input.game_chart_scope == 'game'", selectInput("single_game", "Individual game shot chart", choices = NULL)),
-                                 title = "Game", open = TRUE
-                               ), 
-                               p(strong("Note: Click a point on the shot chart below to see shot details.")), 
-                               plotOutput("shot_chart", click = "shot_chart_click", width = "100%", height = "60vh"), 
-                               uiOutput("clicked_net_ui"), 
-                               DTOutput("clicked_shot"), 
-                               plotOutput("xg_timeline", width = "100%", height = "45vh")
+                                 selectInput(
+                                   "game_chart_scope",
+                                   "Shot chart view",
+                                   choices = c(
+                                     "All Games" = "all",
+                                     "Filter by Year" = "year",
+                                     "Individual Game" = "game"
+                                   )
+                                 ),
+                                 
+                                 conditionalPanel(
+                                   "input.game_chart_scope == 'year'",
+                                   selectInput("single_game_year", "Year", choices = NULL)
+                                 ),
+                                 
+                                 conditionalPanel(
+                                   "input.game_chart_scope == 'game'",
+                                   selectInput(
+                                     "single_game",
+                                     "Individual game shot chart",
+                                     choices = NULL
+                                   )
+                                 ),
+                                 
+                                 title = "Game",
+                                 open = TRUE
+                               ),
+                               
+                               p(
+                                 strong(
+                                   "Note: Click a point on the shot chart below to see shot details."
+                                 )
+                               ),
+                               
+                               div(
+                                 class = "shot-chart-container",
+                                 plotOutput(
+                                   "shot_chart",
+                                   click = "shot_chart_click",
+                                   width = "100%",
+                                   height = "100%"
+                                 )
+                               ),
+                               
+                               uiOutput("clicked_net_ui"),
+                               DTOutput("clicked_shot"),
+                               plotOutput(
+                                 "xg_timeline",
+                                 width = "100%",
+                                 height = "45vh"
+                               )
                              )
             )
   ),
   nav_panel("Add/upload shots", value = "add_upload_tab", h4("Click shot location or upload data"), actionButton("open_upload", "Upload data", class = "btn-secondary"), plotOutput("field_click", click = "field_click", hover = hoverOpts("field_hover"), width = "100%", height = "70vh"), textOutput("field_point")),
   nav_panel("Edit shot data", value = "edit_shot_tab",
             p("Select a row and click 'Edit selected row' to modify data. Use 'Delete selected row' if a shot should be removed."), 
-            actionButton("edit_row_btn", "Edit selected row", class = "btn-warning"), # Added Edit Button
+            actionButton("edit_row_btn", "Edit selected row", class = "btn-warning"), 
             actionButton("delete_shot", "Delete selected row(s)", class = "btn-danger"),
             actionButton("delete_all", "Delete all data", class = "btn-danger"),
             DTOutput("recent_shots")),
   
-  # Contact Tab
   nav_panel("Contact", 
             fluidPage(
               h3("About the Author"),
@@ -1734,11 +1862,23 @@ server <- function(input, output, session) {
       ) +
       scale_colour_manual(values = c(GOAL = "#FFD700", SAVED = "#2C7FB8", MISSED = "#666666", BLOCKED = "#D95F0E"), drop = FALSE) +
       scale_size_continuous(range = c(2.67, 8)) +
-      # Updated to accommodate vertically stacked text
-      annotate("label", x = FIELD_LENGTH / 2, y = FIELD_WIDTH - 5, label = scoreline_text(), size = 5, fill = "white", lineheight = 0.9) +
-      labs(colour = "Result", size = "xG") +
-      # Moves legend to bottom to prevent field shrinking on mobile
-      theme(legend.position = "bottom", legend.title = element_text(size = 14), legend.text = element_text(size = 14))
+      labs(title = scoreline_text(), colour = "Result", size = "xG") +
+      theme(
+        legend.position = "bottom", 
+        legend.box = "vertical", # Stack legend groupings vertically to prevent horizontal cutoff
+        legend.margin = margin(t = 10, b = 10),
+        legend.title = element_text(size = 14), 
+        legend.text = element_text(size = 14),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16, lineheight = 1.1)
+      ) +
+      guides(
+        colour = guide_legend(
+          nrow = 2, 
+          byrow = TRUE, 
+          override.aes = list(size = 5) # Increase this number (e.g., 4, 5, 6) to make the legend color points larger
+        ), 
+        size = guide_legend(nrow = 1)
+      )
   })
   
   clicked_shot_data <- reactive({
@@ -1771,7 +1911,56 @@ server <- function(input, output, session) {
       ))) %>%
       datatable(options = list(dom = "t", scrollX = TRUE), rownames = FALSE)
   })
-  output$xg_timeline <- renderPlot({ selected_game() %>% arrange(Minute) %>% mutate(team_xg = cumsum(ifelse(Team == "TEAM", goals.y, 0)), opp_xg = cumsum(ifelse(Team == "OPPONENT", goals.y, 0))) %>% ggplot(aes(Minute)) + geom_step(aes(y = team_xg, colour = "Team")) + geom_step(aes(y = opp_xg, colour = "Opponent")) + labs(y = "Cumulative xG", colour = NULL) })
+  output$xg_timeline <- renderPlot({ 
+    data <- selected_game()
+    if (nrow(data) == 0) return(ggplot() + theme_void())
+    
+    # Determine the maximum minute (at least 90, but extends for OT)
+    max_minute <- max(90, max(data$Minute, na.rm = TRUE))
+    
+    # Calculate appropriate breaks for the x-axis (every 15 minutes up to the max minute)
+    x_breaks <- seq(0, ceiling(max_minute / 15) * 15, by = 15)
+    
+    # Aggregate xG by Minute and Team (sums multiple shots in the same minute for 'All Games')
+    agg_data <- data %>%
+      group_by(Minute, Team) %>%
+      summarize(minute_xg = sum(goals.y, na.rm = TRUE), .groups = "drop")
+    
+    # Create a complete grid of every minute for both teams to ensure the step chart flatlines correctly
+    full_grid <- tidyr::expand_grid(
+      Minute = 0:max_minute,
+      Team = c("TEAM", "OPPONENT")
+    )
+    
+    # Join grid with aggregated data, fill empty minutes with 0 xG, and calculate cumulative sum
+    plot_data <- full_grid %>%
+      left_join(agg_data, by = c("Minute", "Team")) %>%
+      mutate(minute_xg = replace_na(minute_xg, 0)) %>%
+      arrange(Team, Minute) %>%
+      group_by(Team) %>%
+      mutate(
+        cum_xg = cumsum(minute_xg),
+        Team_Label = ifelse(Team == "TEAM", "Team", "Opponent")
+      ) %>%
+      ungroup()
+    
+    # Plot the timeline
+    ggplot(plot_data, aes(x = Minute, y = cum_xg, colour = Team_Label)) + 
+      geom_step(linewidth = 1) + 
+      scale_x_continuous(breaks = x_breaks) + # Forces labels at 0, 15, 30, 45, 60, 75, 90, 105, 120, etc.
+      labs(
+        title = ifelse(input$game_chart_scope == "game", "Match xG Timeline", "Aggregated xG Timeline by Minute"),
+        x = "Minute",
+        y = "Cumulative xG", 
+        colour = NULL
+      ) +
+      expand_limits(x = c(0, max_minute)) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        legend.position = "bottom"
+      )
+  })
   
   net_click_point <- reactiveVal(NULL)
   

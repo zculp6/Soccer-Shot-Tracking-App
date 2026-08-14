@@ -5,7 +5,7 @@ account: zculp
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 17689792
-bundleId: 12397332
+bundleId: 12411564
 url: https://zculp.shinyapps.io/Soccer-Shot-Tracking-App/
 version: 1
 asMultiple: FALSE
